@@ -1,9 +1,3 @@
-# Margin: serverless blog platform (Day 3)
-
-A small publishing platform. Anyone can read. Signed-in users write stories and comment. Members of the Cognito `admins` group moderate.
-
-**Cost: $0 on the AWS free tier.** Cognito, Lambda, HTTP API, DynamoDB (on-demand), S3 and CloudFront all stay inside free allowances at demo scale.
-
 ## Architecture
 
 ```mermaid
