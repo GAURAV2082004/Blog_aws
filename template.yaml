@@ -1,0 +1,217 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Day 3 - Margin blog platform (Cognito + HTTP API JWT authorizer + Lambda/Express + DynamoDB + S3/CloudFront)
+
+Parameters:
+  ExtraAllowedOrigin:
+    Type: String
+    Default: http://localhost:5173
+    Description: Second CORS origin (local dev). Set to your CloudFront URL again to effectively disable it.
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 10
+    MemorySize: 256
+    Tags:
+      project: day03
+
+Resources:
+  # ---------- Data ----------
+  BlogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+        - { AttributeName: GSI1PK, AttributeType: S }
+        - { AttributeName: GSI1SK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - { AttributeName: GSI1PK, KeyType: HASH }
+            - { AttributeName: GSI1SK, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      Tags:
+        - { Key: project, Value: day03 }
+
+  # ---------- Auth ----------
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: margin-users
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Schema:
+        - { Name: name, AttributeDataType: String, Required: true, Mutable: true }
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      UserPoolTags:
+        project: day03
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: margin-web
+      GenerateSecret: false # browser apps cannot keep a secret
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows: [ALLOW_USER_SRP_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+
+  AdminsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: admins
+      Description: Moderators who can edit or delete any story or comment
+
+  # ---------- API ----------
+  BlogApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - !Sub https://${SiteDistribution.DomainName}
+          - !Ref ExtraAllowedOrigin
+        AllowMethods: [GET, POST, PUT, DELETE, OPTIONS]
+        AllowHeaders: [Authorization, Content-Type]
+        MaxAge: 600
+      Auth:
+        DefaultAuthorizer: CognitoJwt
+        Authorizers:
+          CognitoJwt:
+            IdentitySource: $request.header.Authorization
+            JwtConfiguration:
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+              audience:
+                - !Ref UserPoolClient
+      Tags:
+        project: day03
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: handler.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref BlogTable
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:BatchWriteItem
+                - dynamodb:Query
+              Resource:
+                - !GetAtt BlogTable.Arn
+                - !Sub ${BlogTable.Arn}/index/GSI1
+      Events:
+        ListPosts:
+          Type: HttpApi
+          Properties: { ApiId: !Ref BlogApi, Path: /api/posts, Method: GET, Auth: { Authorizer: NONE } }
+        GetPost:
+          Type: HttpApi
+          Properties: { ApiId: !Ref BlogApi, Path: '/api/posts/{id}', Method: GET, Auth: { Authorizer: NONE } }
+        Me:
+          Type: HttpApi
+          Properties: { ApiId: !Ref BlogApi, Path: /api/me, Method: GET }
+        CreatePost:
+          Type: HttpApi
+          Properties: { ApiId: !Ref BlogApi, Path: /api/posts, Method: POST }
+        UpdatePost:
+          Type: HttpApi
+          Properties: { ApiId: !Ref BlogApi, Path: '/api/posts/{id}', Method: PUT }
+        DeletePost:
+          Type: HttpApi
+          Properties: { ApiId: !Ref BlogApi, Path: '/api/posts/{id}', Method: DELETE }
+        AddComment:
+          Type: HttpApi
+          Properties: { ApiId: !Ref BlogApi, Path: '/api/posts/{id}/comments', Method: POST }
+        DeleteComment:
+          Type: HttpApi
+          Properties: { ApiId: !Ref BlogApi, Path: '/api/posts/{id}/comments/{commentId}', Method: DELETE }
+
+  # ---------- Frontend hosting (private bucket + CloudFront OAC) ----------
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - { Key: project, Value: day03 }
+
+  SiteOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${AWS::StackName}-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  SiteDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      Tags:
+        - { Key: project, Value: day03 }
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        Origins:
+          - Id: site
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt SiteOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: site
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Managed-CachingOptimized
+
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub ${SiteBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${SiteDistribution}
+
+Outputs:
+  ApiUrl:
+    Value: !Sub https://${BlogApi}.execute-api.${AWS::Region}.amazonaws.com
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  SiteBucketName:
+    Value: !Ref SiteBucket
+  DistributionId:
+    Value: !Ref SiteDistribution
+  SiteUrl:
+    Value: !Sub https://${SiteDistribution.DomainName}

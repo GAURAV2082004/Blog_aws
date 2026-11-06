@@ -1,0 +1,19 @@
+{
+  "name": "margin-blog-backend",
+  "version": "1.0.0",
+  "private": true,
+  "main": "handler.js",
+  "scripts": {
+    "dev": "node --watch local.js",
+    "start": "node local.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/lib-dynamodb": "^3.600.0",
+    "aws-jwt-verify": "^4.0.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "serverless-http": "^3.2.0"
+  }
+}
